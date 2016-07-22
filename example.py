@@ -768,7 +768,7 @@ CREATE TABLE pokemon
         check_table = False
     
     #insert record
-    statementFormat = u"INSERT INTO pokemon (spawn_point_id,id,name,latitude,longitude,disappear_time) VALUES ('%s','%s','%s',%s,%s,to_timestamp(%s))"
+    statementFormat = u"INSERT INTO pokemon (spawn_point_id,id,name,latitude,longitude,disappear_time) VALUES ('%s','%s','%s',%s,%s,date_trunc('minute',to_timestamp(%s)))"
     statement = statementFormat % (spawnPointID,pokemon['id'],pokemon['name'],pokemon['lat'],pokemon['lng'],pokemon['disappear_time'])
     cursor = database_connection.cursor()
     cursor.execute(statement)
@@ -890,7 +890,32 @@ def dumpData():
         database_connection.set_client_encoding('utf-8')
     
     #get records
-    query = "SELECT * FROM pokemon"
+    query = """
+SELECT
+    spawn_point_id,
+    id,
+    MIN(name) AS name,
+    MIN(latitude) AS latitude,
+    MIN(longitude) AS longitude,
+    disappear_time,
+    MIN(found_time) AS found_time
+FROM
+(
+    SELECT
+        spawn_point_id,
+        id,
+        name,
+        latitude,
+        longitude,
+        date_trunc('minute',disappear_time) AS disappear_time,
+        found_time 
+    FROM pokemon
+) AS normalized
+GROUP BY
+    spawn_point_id,
+    id,
+    disappear_time
+"""
     cursor = database_connection.cursor(cursor_factory=psycopg2.extras.DictCursor)
     cursor.execute(query)
     results = cursor.fetchall()
