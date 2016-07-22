@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import flask
-from flask import Flask, render_template
+from flask import Flask, render_template, send_file
 from flask_googlemaps import GoogleMaps
 from flask_googlemaps import Map
 from flask_googlemaps import icons
@@ -18,6 +18,9 @@ import threading
 import werkzeug.serving
 import pokemon_pb2
 import time
+import psycopg2
+import psycopg2.extras
+import StringIO
 from google.protobuf.internal import encoder
 from google.protobuf.message import DecodeError
 from s2sphere import *
@@ -81,6 +84,10 @@ is_ampm_clock = False
 # stuff for in-background search thread
 
 search_thread = None
+
+# database storage
+database_connection = None
+check_table = True
 
 def memoize(obj):
     cache = obj.cache = {}
@@ -597,6 +604,7 @@ def main():
     dx = 0
     dy = -1
     steplimit2 = steplimit**2
+    totalFound = []
     for step in range(steplimit2):
         #starting at 0 index
         debug('looping: step {} of {}'.format((step+1), steplimit**2))
@@ -609,8 +617,8 @@ def main():
 
         (x, y) = (x + dx, y + dy)
 
-        process_step(args, api_endpoint, access_token, profile_response,
-                     pokemonsJSON, ignore, only)
+        found = process_step(args, api_endpoint, access_token, profile_response, pokemonsJSON, ignore, only)
+        totalFound.extend(found)
 
         print('Completed: ' + str(
             ((step+1) + pos * .25 - .25) / (steplimit2) * 100) + '%')
@@ -624,7 +632,12 @@ def main():
         NEXT_LONG = 0
     else:
         set_location_coords(origin_lat, origin_lon, 0)
-
+    
+    debug('total found: {}'.format(len(totalFound)))
+    if(len(totalFound) == 0):
+        debug('retrying login')
+        login.cache = {} #reset memoize cache
+    
     register_background_thread()
 
 
@@ -706,6 +719,60 @@ transform_from_wgs_to_gcj(Location(Fort.Latitude, Fort.Longitude))
             "id": poke.pokemon.PokemonId,
             "name": pokename
         }
+        
+        storePokemon(pokemons[poke.SpawnPointId],poke.SpawnPointId)
+    return visible
+
+def storePokemon(pokemon,spawnPointID):
+    """ stores the pokemon for historical tracking """
+    
+    #get globals
+    global database_connection
+    global check_table
+    
+    #check for connection
+    if(not database_connection):
+        connectionString = os.getenv('DATABASE_URL',"")
+        if(not connectionString):
+            return #skip since no database details provided
+        database_connection = psycopg2.connect(connectionString)
+        database_connection.set_client_encoding('utf-8')
+    
+    #check for table
+    if(check_table):
+        query = "SELECT * FROM pokemon LIMIT 1"
+        cursor = database_connection.cursor()
+        try:
+            cursor.execute(query)
+            results = cursor.fetchall()
+            needToCreateTable = False
+        except:
+            database_connection.rollback()
+            needToCreateTable = True
+        if(needToCreateTable):
+            statement = """
+CREATE TABLE pokemon
+(
+    spawn_point_id VARCHAR(255),
+    id VARCHAR(255),
+    name VARCHAR(255),
+    latitude NUMERIC(10,6),
+    longitude NUMERIC(10,6),
+    disappear_time TIMESTAMP,
+    found_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+            cursor = database_connection.cursor()
+            cursor.execute(statement)
+            database_connection.commit()
+        check_table = False
+    
+    #insert record
+    statementFormat = u"INSERT INTO pokemon (spawn_point_id,id,name,latitude,longitude,disappear_time) VALUES ('%s','%s','%s',%s,%s,to_timestamp(%s))"
+    statement = statementFormat % (spawnPointID,pokemon['id'],pokemon['name'],pokemon['lat'],pokemon['lng'],pokemon['disappear_time'])
+    cursor = database_connection.cursor()
+    cursor.execute(statement)
+    database_connection.commit()
 
 def clear_stale_pokemons():
     current_time = time.time()
@@ -806,6 +873,36 @@ def next_loc():
         NEXT_LONG = float(lon)
         return 'ok'
 
+
+@app.route('/dump')
+def dumpData():
+    """ dumps data from database"""
+    
+    #get globals
+    global database_connection
+    
+    #check for connection
+    if(not database_connection):
+        connectionString = os.getenv('DATABASE_URL',"")
+        if(not connectionString):
+            return #skip since no database details provided
+        database_connection = psycopg2.connect(connectionString)
+        database_connection.set_client_encoding('utf-8')
+    
+    #get records
+    query = "SELECT * FROM pokemon"
+    cursor = database_connection.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor.execute(query)
+    results = cursor.fetchall()
+    
+    #output to CSV
+    csvOutput = StringIO.StringIO()
+    csvOutput.write("spawn point id,id,name,latitude,longitude,disappear time,found time\n")
+    for result in results:
+        line = "'%s','%s','%s',%s,%s,'%s','%s'\n" % (result['spawn_point_id'],result['id'],result['name'],result['latitude'],result['longitude'],result['disappear_time'],result['found_time'])
+        csvOutput.write(line)
+    csvOutput.seek(0)
+    return send_file(csvOutput,attachment_filename="dump.csv",as_attachment=True)
 
 def get_pokemarkers():
     pokeMarkers = [{
