@@ -636,7 +636,7 @@ def main():
     debug('total found: {}'.format(len(totalFound)))
     if(len(totalFound) == 0):
         debug('retrying login')
-        login.cache = {} #reset memoize cache
+        login.cache.clear() #reset memoize cache
     
     register_background_thread()
 
